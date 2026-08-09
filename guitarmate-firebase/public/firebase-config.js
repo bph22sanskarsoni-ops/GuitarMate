@@ -3,10 +3,10 @@
 //  Firebase Console → Project Settings → Your apps → Web app → SDK setup
 // ─────────────────────────────────────────────────────────────
 window.FIREBASE_CONFIG = {
-  apiKey:            "PASTE_YOUR_API_KEY_HERE",
-  authDomain:        "PASTE_YOUR_PROJECT_ID.firebaseapp.com",
-  projectId:         "PASTE_YOUR_PROJECT_ID",
-  storageBucket:     "PASTE_YOUR_PROJECT_ID.appspot.com",
-  messagingSenderId: "PASTE_YOUR_SENDER_ID",
-  appId:             "PASTE_YOUR_APP_ID"
+  apiKey:            "AIzaSyAaSaxDowK1_MeCBA8TxdT1-HiIdYRRMg0",
+  authDomain:        "guitarmate-khush.firebaseapp.com",
+  projectId:         "guitarmate-khush",
+  storageBucket:     "guitarmate-khush.appspot.com",
+  messagingSenderId: "157995564728",
+  appId:             "1:157995564728:web:e5439fc85bcb5714343e4d"
 };
