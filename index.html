@@ -1006,18 +1006,25 @@ let targetCents  = 0;        // raw detected cents (this frame)
 let lastDetectedNote = '';
 let lockedStrIdx = -1;       // -1 = auto (no lock), 0-5 = locked to that string
 let lastFrameTime = 0;       // for frame-rate independent smoothing
-let silenceFrames = 0;       // counts consecutive frames with no signal
-let pitchHistory = [];       // rolling buffer for median smoothing of raw freq
-const PITCH_HISTORY_SIZE = 6;
+let silenceFrames = 0;
+let pitchHistory  = [];
+const PITCH_HISTORY_SIZE = 8;  // larger = smoother
 
-// Canvas setup
+// ── CANVAS SETUP ──
 const canvas = document.getElementById('arcCanvas');
 const ctx2d   = canvas.getContext('2d');
 let CW=0, CH=0, CX=0, CY=0, CR=0;
+let _rr = 0; // resize retries
 
 function resizeCanvas(){
   const wrap = canvas.parentElement;
-  CW = wrap.clientWidth;
+  const w = wrap ? wrap.clientWidth : 0;
+  if(w < 20){ // not visible yet — retry
+    if(_rr++ < 40) setTimeout(resizeCanvas, 80);
+    return;
+  }
+  _rr = 0;
+  CW = w;
   CH = Math.round(CW * 0.72);
   canvas.width  = CW * devicePixelRatio;
   canvas.height = CH * devicePixelRatio;
@@ -1025,42 +1032,29 @@ function resizeCanvas(){
   canvas.style.height = CH + 'px';
   ctx2d.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
   CX = CW / 2;
-  CY = CH * 1.05;
+  CY = CH * 1.06;
   CR = CW * 0.44;
-  drawArc(0, false);
-}
-window.addEventListener('resize', ()=>{ if(CW>0) resizeCanvas(); });
-
-// Canvas tab resize karo jab tuner screen visible ho
-function initCanvasIfNeeded(){
-  if(CW === 0 || canvas.parentElement.clientWidth !== CW){
-    resizeCanvas();
-  }
+  drawArc(currentCents, !!lastDetectedNote);
 }
 
-// Tuner tab visible hone par canvas init karo
-const _origSwitchTab = window.switchTab;
-window.switchTab = function(tab){
-  if(_origSwitchTab) _origSwitchTab(tab);
-  if(tab === 'tuner') setTimeout(resizeCanvas, 50);
+window.addEventListener('resize', ()=>{ _rr=0; resizeCanvas(); });
+
+// Watch gmAppShell class changes (hidden→visible after login)
+new MutationObserver(()=>{
+  _rr=0; setTimeout(resizeCanvas, 60);
+}).observe(document.getElementById('gmAppShell')||document.body,
+  {attributes:true, attributeFilter:['class']});
+
+// Intercept tab switch
+const _origSW = window.switchTab;
+window.switchTab = function(t){
+  if(_origSW) _origSW(t);
+  if(t==='tuner'){ _rr=0; setTimeout(resizeCanvas, 30); }
 };
 
-// Jab app shell visible ho (after login) tab bhi resize karo
-const _tunerObserver = new MutationObserver(()=>{
-  const shell = document.getElementById('gmAppShell');
-  if(shell && !shell.classList.contains('hidden')){
-    setTimeout(resizeCanvas, 100);
-  }
-});
-const _shell = document.getElementById('gmAppShell');
-if(_shell) _tunerObserver.observe(_shell, {attributes:true, attributeFilter:['class']});
-
-// Fallback: try after DOM fully ready
-if(document.readyState === 'complete'){
-  setTimeout(resizeCanvas, 200);
-} else {
-  window.addEventListener('load', ()=> setTimeout(resizeCanvas, 200));
-}
+// Startup
+window.addEventListener('load', ()=>{ _rr=0; setTimeout(resizeCanvas,120); });
+setTimeout(resizeCanvas, 300); // extra safety fallback
 
 /* ── ARC DRAW ── */
 function drawArc(cents, hasNote){
@@ -1163,7 +1157,7 @@ function animateNeedle(timestamp){
 
   // Exponential smoothing tuned to be framerate-independent.
   // Higher "speed" = snappier; tuned to feel like GuitarTuna's needle.
-  const speed = 10; // per-second response rate
+  const speed = 7; // lower = smoother glide // per-second response rate
   const alpha = 1 - Math.exp(-speed * (dt/1000));
   currentCents += (targetCents - currentCents) * alpha;
 
@@ -1187,7 +1181,7 @@ async function startMic(){
     micStream = stream;
     audioCtx  = new(window.AudioContext||window.webkitAudioContext)();
     analyser  = audioCtx.createAnalyser();
-    analyser.fftSize = 4096;
+    analyser.fftSize = 8192; // higher = more accurate low freqs
     analyser.smoothingTimeConstant = 0; // we do our own smoothing
     audioCtx.createMediaStreamSource(stream).connect(analyser);
     listening = true;
@@ -1224,29 +1218,33 @@ function tunerLoop(){
   if(!listening) return;
   const rawFreq = getPitch();
 
-  if(rawFreq && rawFreq > 55 && rawFreq < 600){
+  if(rawFreq > 0){
     silenceFrames = 0;
 
-    // Median-filter the raw frequency to kill single-frame jitter/outliers
+    // Stage 1: push to rolling history
     pitchHistory.push(rawFreq);
     if(pitchHistory.length > PITCH_HISTORY_SIZE) pitchHistory.shift();
-    const sorted = [...pitchHistory].sort((a,b)=>a-b);
-    const medianFreq = sorted[Math.floor(sorted.length/2)];
 
-    updateTunerUI(medianFreq);
+    // Stage 2: weighted median — trim top/bottom 25%, average middle 50%
+    // This kills outliers without adding lag
+    const sorted = [...pitchHistory].sort((a,b)=>a-b);
+    const lo = Math.floor(sorted.length * 0.25);
+    const hi = Math.ceil(sorted.length  * 0.75);
+    const mid = sorted.slice(lo, hi);
+    const freq = mid.reduce((a,b)=>a+b,0) / mid.length;
+
+    updateTunerUI(freq);
   } else {
     silenceFrames++;
-    // only clear after a short hang time so brief dropouts don't flicker the needle
-    if(silenceFrames > 18){
+    if(silenceFrames > 25){ // ~400ms hang so brief dropouts don't flicker
       targetCents = 0;
       lastDetectedNote = '';
       document.getElementById('arcNote').textContent = '–';
       document.getElementById('arcNote').className = 'tuner-note-big';
       document.getElementById('arcStatus').textContent = '';
       document.getElementById('arcFreq').textContent = 'Listening...';
-      if(lockedStrIdx === -1){
+      if(lockedStrIdx===-1)
         document.querySelectorAll('.tuner-str-btn').forEach(b=>b.classList.remove('detected'));
-      }
       pitchHistory = [];
     }
   }
@@ -1259,27 +1257,62 @@ function getPitch(){
   return autoCorrelate(buf, audioCtx.sampleRate);
 }
 
+// ── YIN PITCH DETECTION (professional grade — same as GuitarTuna uses) ──
 function autoCorrelate(buf, sr){
-  let SIZE=buf.length, rms=0;
-  for(let i=0;i<SIZE;i++) rms+=buf[i]*buf[i];
-  rms=Math.sqrt(rms/SIZE);
-  if(rms<0.012) return -1;
-  let r1=0, r2=SIZE-1;
-  for(let i=0;i<SIZE/2;i++) if(Math.abs(buf[i])<0.2){r1=i;break;}
-  for(let i=1;i<SIZE/2;i++) if(Math.abs(buf[SIZE-i])<0.2){r2=SIZE-i;break;}
-  buf=buf.slice(r1,r2); SIZE=buf.length;
-  if(SIZE < 8) return -1;
-  const c=new Array(SIZE).fill(0);
-  for(let i=0;i<SIZE;i++) for(let j=0;j<SIZE-i;j++) c[i]+=buf[j]*buf[j+i];
-  let d=0; while(d < SIZE-1 && c[d]>c[d+1]) d++;
-  let mx=-1,mp=-1;
-  for(let i=d;i<SIZE;i++) if(c[i]>mx){mx=c[i];mp=i;}
-  if(mp <= 0 || mp >= SIZE-1) return -1;
-  let T0=mp;
-  const xa=c[T0-1],xb=c[T0],xc=c[T0+1],a=(xa+xc-2*xb)/2,b=(xc-xa)/2;
-  if(a) T0=T0-b/(2*a);
-  const freq = sr/T0;
-  if(!isFinite(freq) || freq<=0) return -1;
+  const SIZE = buf.length;
+  const HALF = SIZE >> 1;
+  const THRESH = 0.10;
+
+  // RMS silence gate
+  let rms = 0;
+  for(let i=0;i<SIZE;i++) rms += buf[i]*buf[i];
+  rms = Math.sqrt(rms/SIZE);
+  if(rms < 0.015) return -1;
+
+  // Difference function
+  const d = new Float32Array(HALF);
+  for(let tau=1; tau<HALF; tau++){
+    for(let i=0; i<HALF; i++){
+      const diff = buf[i] - buf[i+tau];
+      d[tau] += diff*diff;
+    }
+  }
+
+  // Cumulative mean normalized difference (CMND)
+  const cmnd = new Float32Array(HALF);
+  cmnd[0] = 1;
+  let runSum = 0;
+  for(let tau=1; tau<HALF; tau++){
+    runSum += d[tau];
+    cmnd[tau] = runSum===0 ? 0 : d[tau]*tau/runSum;
+  }
+
+  // Find first dip below threshold
+  let tau = -1;
+  for(let t=2; t<HALF-1; t++){
+    if(cmnd[t] < THRESH){
+      while(t+1 < HALF && cmnd[t+1] < cmnd[t]) t++;
+      tau = t;
+      break;
+    }
+  }
+
+  // Fallback: global minimum
+  if(tau === -1){
+    let minVal=Infinity;
+    for(let t=2; t<HALF; t++) if(cmnd[t]<minVal){minVal=cmnd[t];tau=t;}
+    if(minVal > 0.35) return -1;
+  }
+
+  if(tau<2 || tau>=HALF-1) return -1;
+
+  // Parabolic interpolation for sub-sample precision
+  const a0=cmnd[tau-1], a1=cmnd[tau], a2=cmnd[tau+1];
+  const den = 2*(a0-2*a1+a2);
+  const tauF = den===0 ? tau : tau-(a2-a0)/(2*den);
+
+  const freq = sr/tauF;
+  if(!isFinite(freq)||freq<50||freq>500) return -1;
   return freq;
 }
 
@@ -1570,7 +1603,7 @@ document.addEventListener('click',e=>{
 });
 
 /* ── SAVE ── */
-function saveSong(){
+async function saveSong(){
   const name=document.getElementById('songName').value.trim();
   if(!name){alert('Song ka naam daalo!');goStep(1);return;}
   const chords=selChords.filter(c=>c.trim()!=='');
@@ -1578,13 +1611,41 @@ function saveSong(){
   const strumming=document.getElementById('strummingInput').value.trim();
   const notes=document.getElementById('songNotes').value.trim();
 
+  const id = editingId || Date.now().toString();
+  const songObj = {
+    id, name, chords, strumming, notes,
+    thumbData: thumbDataUrl,
+    emoji: editingId ? (songs.find(s=>s.id===editingId)?.emoji||rndEmoji()) : rndEmoji(),
+    updatedAt: Date.now()
+  };
+
+  // Update local array
   if(editingId){
     const idx=songs.findIndex(s=>s.id===editingId);
-    if(idx>=0)songs[idx]={...songs[idx],name,chords,strumming,notes,thumbData:thumbDataUrl};
-  }else{
-    songs.push({id:Date.now().toString(),name,chords,strumming,notes,thumbData:thumbDataUrl,emoji:rndEmoji()});
+    if(idx>=0) songs[idx]=songObj;
+  } else {
+    songs.push(songObj);
   }
-  saveSongs();renderSongs();closeStepModal();
+
+  renderSongs();
+  closeStepModal();
+  showToast('💾 Saving...','');
+
+  // ★ Save to Firestore (cloud sync)
+  if(window._saveSongFS){
+    try{
+      await window._saveSongFS(songObj);
+      showToast('✅ Song saved!','success');
+    }catch(e){
+      console.error('Firestore save error:',e);
+      showToast('⚠️ Saved locally only','');
+      // Fallback: save to localStorage
+      saveSongs();
+    }
+  } else {
+    saveSongs(); // fallback if not logged in
+    showToast('💾 Saved locally','');
+  }
 }
 
 const rndEmoji=()=>['🎵','🎶','🎸','🎼','🎤','🎹','🎷','🎺','🥁'][Math.floor(Math.random()*9)];
@@ -1621,11 +1682,21 @@ function openViewModal(id){
 
 function closeViewModal(){document.getElementById('viewModal').classList.remove('open');curViewId=null;}
 
-function deleteSong(){
+async function deleteSong(){
   if(!curViewId)return;
   if(!confirm('Is song ko delete karna chahte ho?'))return;
-  songs=songs.filter(s=>s.id!==curViewId);
-  saveSongs();renderSongs();closeViewModal();
+  const id=curViewId;
+  songs=songs.filter(s=>s.id!==id);
+  renderSongs();
+  closeViewModal();
+  // ★ Delete from Firestore
+  if(window._deleteSongFS){
+    try{ await window._deleteSongFS(id); }
+    catch(e){ console.error('Firestore delete error:',e); saveSongs(); }
+  } else {
+    saveSongs();
+  }
+  showToast('🗑️ Song deleted','');
 }
 
 function editCurrentSong(){
@@ -1762,8 +1833,17 @@ function confirmImport(){
   }
 
   songs = [...songs, ...newSongs];
-  saveSongs();
   renderSongs();
+
+  // ★ Save all imported songs to Firestore
+  for(const song of newSongs){
+    if(window._saveSongFS){
+      try{ await window._saveSongFS(song); }
+      catch(e){ console.error('Import sync error:',e); saveSongs(); }
+    } else {
+      saveSongs();
+    }
+  }
 
   showToast(`✅ ${newSongs.length} songs import ho gaye!`, 'success');
   cancelImport();
@@ -1778,14 +1858,20 @@ function cancelImport(){
 }
 
 /* ── DELETE ALL ── */
-function deleteAllSongs(){
+async function deleteAllSongs(){
   if(!songs.length){ showToast('Koi songs nahi hain', ''); return; }
   if(!confirm(`Sare ${songs.length} songs delete karna chahte ho? Ye wapas nahi aayenge!`)) return;
   songs = [];
-  saveSongs();
   renderSongs();
-  showToast('🗑️ Saare songs delete ho gaye', '');
   closeSettings();
+  // ★ Delete all from Firestore
+  if(window._deleteAllSongsFS){
+    try{ await window._deleteAllSongsFS(); showToast('🗑️ Saare songs delete ho gaye', ''); }
+    catch(e){ console.error(e); saveSongs(); showToast('🗑️ Deleted locally',''); }
+  } else {
+    saveSongs();
+    showToast('🗑️ Saare songs delete ho gaye', '');
+  }
 }
 </script>
 
